@@ -35,4 +35,17 @@ return [
         ],
     ],
 
+    'clickpesa' => [
+        'base_url' => env('CLICKPESA_BASE_URL'),
+        'api_key' => env('CLICKPESA_API_KEY'),
+        'client_id' => env('CLICKPESA_CLIENT_ID'),
+        'checksum_key' => env('CLICKPESA_CHECKSUM_KEY'),
+    ],
+
+    'main_platform' => [
+        'url' => env('MAIN_PLATFORM_URL'),
+        'internal_key' => env('INTERNAL_SERVICE_KEY'),
+        'callback_secret' => env('PAYMENT_CALLBACK_SECRET'),
+    ],
+
 ];
