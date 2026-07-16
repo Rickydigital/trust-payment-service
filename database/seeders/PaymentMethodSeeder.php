@@ -43,8 +43,8 @@ class PaymentMethodSeeder extends Seeder
                 'logo_url' => null,
                 'type' => 'wallet',
                 // Placeholder — driver not built yet.
-                'driver_class' => \App\Drivers\NalaDriver::class,
-                'config' => [],
+                'driver_class' => \App\Drivers\ManualPayoutDriver::class,
+                'config' => ['channel' => 'nala'],
                 'is_active' => false,
                 'sort_order' => 3,
             ],
@@ -54,8 +54,8 @@ class PaymentMethodSeeder extends Seeder
                 'logo_url' => null,
                 'type' => 'bank',
                 // Placeholder — driver not built yet.
-                'driver_class' => \App\Drivers\BankDriver::class,
-                'config' => [],
+                'driver_class' => \App\Drivers\ManualPayoutDriver::class,
+                'config' => ['channel' => 'bank'],
                 'is_active' => false,
                 'sort_order' => 4,
             ],

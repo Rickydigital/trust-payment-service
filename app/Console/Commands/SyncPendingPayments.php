@@ -171,15 +171,8 @@ class SyncPendingPayments extends Command
                     ]);
                 }
 
-                if ($status === 'confirmed' && ! $transaction->escrowWallet) {
-                    EscrowWallet::create([
-                        'transaction_id' => $transaction->id,
-                        'order_reference' => $transaction->order_reference,
-                        'amount' => $transaction->amount,
-                        'currency' => $transaction->currency,
-                        'status' => 'holding',
-                        'held_at' => now(),
-                    ]);
+                if ($status === 'confirmed') {
+                    $this->createEscrowWallets($transaction);
 
                     Log::info('[SyncPendingPayments] Escrow wallet created', [
                         'transaction_id' => $transaction->id,
@@ -226,10 +219,16 @@ class SyncPendingPayments extends Command
         $body = [
             'event' => $event,
             'order_reference' => $transaction->order_reference,
+            'order_references' => $this->orderReferences($transaction),
             'transaction_reference' => $transaction->reference,
             'amount' => (float) $transaction->amount,
             'currency' => $transaction->currency,
             'status' => $transaction->status,
+            'payer_phone' => $transaction->phone,
+            'provider_key' => $transaction->paymentMethod?->provider_key,
+            'provider_type' => $transaction->paymentMethod?->type,
+            'payment_context' => $transaction->metadata['payment_context'] ?? null,
+            'source_service' => $transaction->metadata['source_service'] ?? null,
         ];
 
         $signature = hash_hmac(
@@ -262,5 +261,63 @@ class SyncPendingPayments extends Command
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    private function createEscrowWallets(PaymentTransaction $transaction): void
+    {
+        $splits = $transaction->metadata['order_splits'] ?? [];
+
+        if (is_array($splits) && ! empty($splits)) {
+            foreach ($splits as $split) {
+                if (! is_array($split) || empty($split['order_reference'])) {
+                    continue;
+                }
+
+                EscrowWallet::firstOrCreate(
+                    [
+                        'transaction_id' => $transaction->id,
+                        'order_reference' => (string) $split['order_reference'],
+                    ],
+                    [
+                        'amount' => round((float) ($split['amount'] ?? 0), 2),
+                        'currency' => $transaction->currency,
+                        'status' => 'holding',
+                        'held_at' => now(),
+                    ]
+                );
+            }
+
+            return;
+        }
+
+        EscrowWallet::firstOrCreate(
+            [
+                'transaction_id' => $transaction->id,
+                'order_reference' => $transaction->order_reference,
+            ],
+            [
+                'amount' => $transaction->amount,
+                'currency' => $transaction->currency,
+                'status' => 'holding',
+                'held_at' => now(),
+            ]
+        );
+    }
+
+    private function orderReferences(PaymentTransaction $transaction): array
+    {
+        $splits = $transaction->metadata['order_splits'] ?? [];
+
+        if (is_array($splits) && ! empty($splits)) {
+            return collect($splits)
+                ->map(fn ($split) => is_array($split) ? ($split['order_reference'] ?? null) : null)
+                ->filter()
+                ->map(fn ($reference) => (string) $reference)
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        return [$transaction->order_reference];
     }
 }

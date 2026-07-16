@@ -4,12 +4,15 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\InitiatePaymentRequest;
+use App\Models\EscrowWallet;
 use App\Models\PaymentAttempt;
 use App\Models\PaymentTransaction;
 use App\Services\PaymentRouter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
@@ -73,6 +76,8 @@ class PaymentController extends Controller
             'metadata' => [
                 'initiated_by_user_id' => $authUser['id'] ?? null,
                 'is_internal_call' => $isInternalCall,
+                'payment_context' => $data['payment_context'] ?? 'marketplace_order',
+                'source_service' => $data['source_service'] ?? 'trust',
             ],
         ]);
 
@@ -89,8 +94,12 @@ class PaymentController extends Controller
             'metadata' => [
                 'attempt_reference' => $attempt->attempt_reference,
                 'initiated_by_user_id' => $authUser['id'] ?? null,
+                'is_internal_call' => $isInternalCall,
+                'payment_context' => $data['payment_context'] ?? 'marketplace_order',
+                'source_service' => $data['source_service'] ?? 'trust',
                 'subtotal' => $data['subtotal'] ?? null,
                 'shipping_fee' => $data['shipping_fee'] ?? null,
+                'order_splits' => $this->normalizeOrderSplits($data),
                 'seller_id' => $data['seller_id'] ?? null,
                 'seller_payout_account' => $this->buildSellerPayoutAccount($data),
                 'delivery_service_id' => $data['delivery_service_id'] ?? null,
@@ -99,6 +108,11 @@ class PaymentController extends Controller
                         ? ['method' => 'mobile', 'phone' => $data['delivery_payout_phone']]
                         : null
                 ),
+                'trust_deal_id' => $data['trust_deal_id'] ?? null,
+                'trust_buyer_id' => $data['trust_buyer_id'] ?? null,
+                'trust_seller_id' => $data['trust_seller_id'] ?? null,
+                'trust_recipient_type' => $data['trust_recipient_type'] ?? 'user',
+                'trust_recipient_account' => $this->buildTrustRecipientAccount($data),
             ],
         ]);
 
@@ -228,9 +242,19 @@ public function attempts(Request $request, string $orderReference): JsonResponse
             ]);
         }
 
+        $previousStatus = $transaction->status;
+
         // Terminal states never change — no point re-querying the provider.
         if (in_array($transaction->status, ['pending', 'initiated'], true) && $transaction->provider_reference) {
             $transaction = $this->refreshFromProvider($transaction);
+        }
+
+        if ($previousStatus !== $transaction->status && in_array($transaction->status, ['confirmed', 'failed', 'cancelled'], true)) {
+            if ($transaction->status === 'confirmed') {
+                $this->createEscrowWallets($transaction);
+            }
+
+            $this->fireCallback($transaction);
         }
 
         return response()->json([
@@ -240,6 +264,8 @@ public function attempts(Request $request, string $orderReference): JsonResponse
             'amount' => (float) $transaction->amount,
             'currency' => $transaction->currency,
             'provider_key' => $transaction->paymentMethod->provider_key,
+            'payment_context' => $transaction->metadata['payment_context'] ?? null,
+            'source_service' => $transaction->metadata['source_service'] ?? null,
             'created_at' => $transaction->created_at,
             'confirmed_at' => $transaction->confirmed_at,
         ]);
@@ -332,6 +358,171 @@ public function attempts(Request $request, string $orderReference): JsonResponse
         }
 
         return null;
+    }
+
+    private function buildTrustRecipientAccount(array $data): ?array
+    {
+        if (! empty($data['trust_recipient_account']) && is_array($data['trust_recipient_account'])) {
+            $account = $data['trust_recipient_account'];
+            $method = $account['method'] ?? null;
+
+            if ($method === 'mobile' && (! empty($account['phone']) || ! empty($account['mobile_phone']))) {
+                return [
+                    'method' => 'mobile',
+                    'phone' => $account['phone'] ?? $account['mobile_phone'],
+                    'mobile_phone' => $account['mobile_phone'] ?? $account['phone'],
+                    'mobile_network' => $account['mobile_network'] ?? null,
+                    'account_name' => $account['account_name'] ?? null,
+                ];
+            }
+
+            if ($method === 'bank' && ! empty($account['account_number'])) {
+                return [
+                    'method' => 'bank',
+                    'bank_name' => $account['bank_name'] ?? null,
+                    'account_name' => $account['account_name'] ?? null,
+                    'account_number' => $account['account_number'],
+                ];
+            }
+
+            if ($method === 'wallet') {
+                return $account;
+            }
+        }
+
+        return $this->buildSellerPayoutAccount($data);
+    }
+
+    private function normalizeOrderSplits(array $data): ?array
+    {
+        if (empty($data['order_splits']) || ! is_array($data['order_splits'])) {
+            return null;
+        }
+
+        return collect($data['order_splits'])
+            ->map(fn (array $split) => [
+                'order_reference' => (string) $split['order_reference'],
+                'amount' => round((float) ($split['amount'] ?? 0), 2),
+                'subtotal' => round((float) ($split['subtotal'] ?? 0), 2),
+                'shipping_fee' => round((float) ($split['shipping_fee'] ?? 0), 2),
+                'seller_id' => isset($split['seller_id']) ? (string) $split['seller_id'] : null,
+                'delivery_service_id' => isset($split['delivery_service_id']) ? (string) $split['delivery_service_id'] : null,
+                'delivery_required' => filter_var($split['delivery_required'] ?? true, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? true,
+            ])
+            ->filter(fn (array $split) => $split['order_reference'] !== '' && $split['amount'] > 0)
+            ->values()
+            ->all();
+    }
+
+    private function createEscrowWallets(PaymentTransaction $transaction): void
+    {
+        $splits = $transaction->metadata['order_splits'] ?? [];
+
+        if (is_array($splits) && ! empty($splits)) {
+            foreach ($splits as $split) {
+                if (! is_array($split) || empty($split['order_reference'])) {
+                    continue;
+                }
+
+                EscrowWallet::firstOrCreate(
+                    [
+                        'transaction_id' => $transaction->id,
+                        'order_reference' => (string) $split['order_reference'],
+                    ],
+                    [
+                        'amount' => round((float) ($split['amount'] ?? 0), 2),
+                        'currency' => $transaction->currency,
+                        'status' => 'holding',
+                        'held_at' => now(),
+                    ]
+                );
+            }
+
+            return;
+        }
+
+        EscrowWallet::firstOrCreate(
+            [
+                'transaction_id' => $transaction->id,
+                'order_reference' => $transaction->order_reference,
+            ],
+            [
+                'amount' => $transaction->amount,
+                'currency' => $transaction->currency,
+                'status' => 'holding',
+                'held_at' => now(),
+            ]
+        );
+    }
+
+    private function fireCallback(PaymentTransaction $transaction): void
+    {
+        if (! $transaction->callback_url) {
+            return;
+        }
+
+        $eventMap = [
+            'confirmed' => 'payment.confirmed',
+            'failed' => 'payment.failed',
+            'cancelled' => 'payment.cancelled',
+        ];
+
+        $event = $eventMap[$transaction->status] ?? null;
+
+        if (! $event) {
+            return;
+        }
+
+        $body = [
+            'event' => $event,
+            'order_reference' => $transaction->order_reference,
+            'order_references' => $this->orderReferences($transaction),
+            'transaction_reference' => $transaction->reference,
+            'amount' => (float) $transaction->amount,
+            'currency' => $transaction->currency,
+            'status' => $transaction->status,
+            'payer_phone' => $transaction->phone,
+            'provider_key' => $transaction->paymentMethod?->provider_key,
+            'provider_type' => $transaction->paymentMethod?->type,
+            'payment_context' => $transaction->metadata['payment_context'] ?? null,
+            'source_service' => $transaction->metadata['source_service'] ?? null,
+        ];
+
+        $signature = hash_hmac(
+            'sha256',
+            json_encode($body, JSON_UNESCAPED_SLASHES),
+            (string) config('services.main_platform.callback_secret')
+        );
+
+        try {
+            Http::withHeaders([
+                'X-Payment-Signature' => $signature,
+                'Content-Type' => 'application/json',
+            ])->timeout(5)->post($transaction->callback_url, $body);
+        } catch (\Throwable $e) {
+            Log::error('Callback to main platform failed from status polling', [
+                'transaction_reference' => $transaction->reference,
+                'callback_url' => $transaction->callback_url,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function orderReferences(PaymentTransaction $transaction): array
+    {
+        $splits = $transaction->metadata['order_splits'] ?? [];
+
+        if (is_array($splits) && ! empty($splits)) {
+            return collect($splits)
+                ->map(fn ($split) => is_array($split) ? ($split['order_reference'] ?? null) : null)
+                ->filter()
+                ->map(fn ($reference) => (string) $reference)
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        return [$transaction->order_reference];
     }
 
     private function makeReference(): string

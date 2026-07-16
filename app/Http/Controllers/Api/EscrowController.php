@@ -96,7 +96,13 @@ class EscrowController extends Controller
                     'recipient_id' => $entry['recipient_id'],
                     'recipient_account' => $entry['recipient_account'],
                     'amount' => $entry['amount'],
+                    'gross_amount' => $entry['gross_amount'],
+                    'platform_fee' => $entry['platform_fee'],
+                    'net_amount' => $entry['net_amount'],
                     'currency' => $wallet->currency,
+                    'status' => $entry['recipient_type'] === 'platform' ? 'paid' : 'available',
+                    'available_at' => $entry['recipient_type'] === 'platform' ? null : now(),
+                    'released_at' => now(),
                 ]);
             }
 
@@ -130,6 +136,7 @@ class EscrowController extends Controller
                 ]);
 
                 $split->update(['payout_job_id' => $payoutJob->id]);
+                $split->update(['status' => 'withdraw_pending']);
 
                 \App\Jobs\ProcessPayoutJob::dispatch($payoutJob->id)
                     ->onQueue('payments');
@@ -155,6 +162,122 @@ class EscrowController extends Controller
         });
     }
 
+    public function releaseSeller(Request $request, string $orderReference): JsonResponse
+    {
+        return $this->releaseRecipient($request, $orderReference, 'seller');
+    }
+
+    public function releaseDelivery(Request $request, string $orderReference): JsonResponse
+    {
+        return $this->releaseRecipient($request, $orderReference, 'delivery_service');
+    }
+
+    public function releaseUser(Request $request, string $orderReference): JsonResponse
+    {
+        return $this->releaseRecipient($request, $orderReference, 'user');
+    }
+
+    private function releaseRecipient(Request $request, string $orderReference, string $recipientType): JsonResponse
+    {
+        $data = $request->validate([
+            'recipient_id' => ['nullable', 'string', 'max:80'],
+            'recipient_account' => ['nullable', 'array'],
+        ]);
+
+        $wallet = EscrowWallet::query()
+            ->where('order_reference', $orderReference)
+            ->with(['transaction', 'splits'])
+            ->first();
+
+        if (! $wallet) {
+            throw ValidationException::withMessages([
+                'order_reference' => 'No escrow found for this order reference.',
+            ]);
+        }
+
+        return DB::transaction(function () use ($wallet, $recipientType, $data) {
+            $wallet = EscrowWallet::query()
+                ->whereKey($wallet->id)
+                ->lockForUpdate()
+                ->with(['transaction', 'splits'])
+                ->firstOrFail();
+
+            if ($wallet->splits->isEmpty()) {
+                foreach ($this->calculateSplits($wallet) as $entry) {
+                    if ($entry['amount'] <= 0) {
+                        continue;
+                    }
+
+                    EscrowSplit::create([
+                        'escrow_wallet_id' => $wallet->id,
+                        'recipient_type' => $entry['recipient_type'],
+                        'recipient_id' => $entry['recipient_id'],
+                        'recipient_account' => $entry['recipient_account'],
+                        'amount' => $entry['amount'],
+                        'gross_amount' => $entry['gross_amount'],
+                        'platform_fee' => $entry['platform_fee'],
+                        'net_amount' => $entry['net_amount'],
+                        'currency' => $wallet->currency,
+                        'status' => $entry['recipient_type'] === 'platform' ? 'paid' : 'held',
+                        'released_at' => $entry['recipient_type'] === 'platform' ? now() : null,
+                        'paid_at' => $entry['recipient_type'] === 'platform' ? now() : null,
+                    ]);
+                }
+
+                $wallet->load('splits');
+            }
+
+            $released = [];
+
+            foreach ($wallet->splits->where('recipient_type', $recipientType) as $split) {
+                $identityUpdates = [];
+                if (! empty($data['recipient_id']) && empty($split->recipient_id)) {
+                    $identityUpdates['recipient_id'] = $data['recipient_id'];
+                }
+                if (! empty($data['recipient_account']) && empty($split->recipient_account)) {
+                    $identityUpdates['recipient_account'] = $data['recipient_account'];
+                }
+
+                if (! in_array($split->status, ['held'], true)) {
+                    if ($identityUpdates) {
+                        $split->update($identityUpdates);
+                        $split = $split->fresh();
+                    }
+                    $released[] = $split;
+                    continue;
+                }
+
+                $split->update([
+                    ...$identityUpdates,
+                    'status' => 'available',
+                    'available_at' => now(),
+                    'released_at' => now(),
+                ]);
+                $released[] = $split->fresh();
+            }
+
+            $wallet->update([
+                'status' => 'releasing',
+                'release_requested_at' => $wallet->release_requested_at ?? now(),
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => "{$recipientType} funds released to available balance.",
+                'order_reference' => $wallet->order_reference,
+                'released' => collect($released)->map(fn (EscrowSplit $split) => [
+                    'recipient_type' => $split->recipient_type,
+                    'recipient_id' => $split->recipient_id,
+                    'status' => $split->status,
+                    'gross_amount' => (float) ($split->gross_amount ?: $split->amount),
+                    'platform_fee' => (float) $split->platform_fee,
+                    'net_amount' => (float) ($split->net_amount ?: $split->amount),
+                    'currency' => $split->currency,
+                ])->values(),
+            ]);
+        });
+    }
+
     /**
      * Calculate the three-way split: seller, delivery_service, platform.
      *
@@ -171,9 +294,14 @@ class EscrowController extends Controller
     {
         $transaction = $wallet->transaction;
         $metadata = $transaction->metadata ?? [];
+        $walletMetadata = $this->metadataForWallet($wallet, $metadata);
 
-        $subtotal = (float) ($metadata['subtotal'] ?? 0);
-        $shippingFee = (float) ($metadata['shipping_fee'] ?? 0);
+        if (($metadata['payment_context'] ?? null) === 'trust_deal') {
+            return $this->calculateTrustDealSplits($wallet, $metadata);
+        }
+
+        $subtotal = (float) ($walletMetadata['subtotal'] ?? $metadata['subtotal'] ?? 0);
+        $shippingFee = (float) ($walletMetadata['shipping_fee'] ?? $metadata['shipping_fee'] ?? 0);
         $totalHeld = (float) $wallet->amount;
 
         $feeSetting = FeeSetting::current();
@@ -187,23 +315,87 @@ class EscrowController extends Controller
         return [
             [
                 'recipient_type' => 'seller',
-                'recipient_id' => $metadata['seller_id'] ?? null,
-                'recipient_account' => $metadata['seller_payout_account'] ?? null,
+                'recipient_id' => $walletMetadata['seller_id'] ?? $metadata['seller_id'] ?? null,
+                'recipient_account' => $walletMetadata['seller_payout_account'] ?? $metadata['seller_payout_account'] ?? null,
                 'amount' => $sellerAmount,
+                'gross_amount' => round($subtotal, 2),
+                'platform_fee' => $sellerFeeAmount,
+                'net_amount' => $sellerAmount,
             ],
             [
                 'recipient_type' => 'delivery_service',
-                'recipient_id' => $metadata['delivery_service_id'] ?? null,
-                'recipient_account' => $metadata['delivery_payout_account'] ?? null,
+                'recipient_id' => $walletMetadata['delivery_service_id'] ?? $metadata['delivery_service_id'] ?? null,
+                'recipient_account' => $walletMetadata['delivery_payout_account'] ?? $metadata['delivery_payout_account'] ?? null,
                 'amount' => $deliveryAmount,
+                'gross_amount' => $deliveryAmount,
+                'platform_fee' => 0.0,
+                'net_amount' => $deliveryAmount,
             ],
             [
                 'recipient_type' => 'platform',
                 'recipient_id' => null,
                 'recipient_account' => null,
                 'amount' => $platformAmount,
+                'gross_amount' => $platformAmount,
+                'platform_fee' => 0.0,
+                'net_amount' => $platformAmount,
             ],
         ];
+    }
+
+    private function calculateTrustDealSplits(EscrowWallet $wallet, array $metadata): array
+    {
+        $totalHeld = (float) $wallet->amount;
+        $dealAmount = (float) ($metadata['subtotal'] ?? $metadata['deal_amount'] ?? $totalHeld);
+
+        $feeSetting = FeeSetting::current();
+        $sellerFeePercent = (float) $feeSetting->seller_fee_percent;
+
+        $sellerFeeAmount = round($dealAmount * ($sellerFeePercent / 100), 2);
+        $recipientAmount = round($dealAmount - $sellerFeeAmount, 2);
+        $platformAmount = round(max(0, $totalHeld - $recipientAmount), 2);
+
+        return [
+            [
+                'recipient_type' => $metadata['trust_recipient_type'] ?? 'user',
+                'recipient_id' => $metadata['trust_seller_id'] ?? null,
+                'recipient_account' => $metadata['trust_recipient_account'] ?? null,
+                'amount' => $recipientAmount,
+                'gross_amount' => round($dealAmount, 2),
+                'platform_fee' => $sellerFeeAmount,
+                'net_amount' => $recipientAmount,
+            ],
+            [
+                'recipient_type' => 'platform',
+                'recipient_id' => null,
+                'recipient_account' => null,
+                'amount' => $platformAmount,
+                'gross_amount' => $platformAmount,
+                'platform_fee' => 0.0,
+                'net_amount' => $platformAmount,
+            ],
+        ];
+    }
+
+    private function metadataForWallet(EscrowWallet $wallet, array $metadata): array
+    {
+        $splits = $metadata['order_splits'] ?? [];
+
+        if (! is_array($splits)) {
+            return [];
+        }
+
+        foreach ($splits as $split) {
+            if (! is_array($split)) {
+                continue;
+            }
+
+            if (($split['order_reference'] ?? null) === $wallet->order_reference) {
+                return $split;
+            }
+        }
+
+        return [];
     }
 
     private function makePayoutReference(): string

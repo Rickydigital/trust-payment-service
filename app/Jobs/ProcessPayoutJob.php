@@ -77,10 +77,30 @@ class ProcessPayoutJob implements ShouldQueue
                 );
             }
 
+            if (($result['manual_review'] ?? false) || ($result['status'] ?? null) === 'manual_review') {
+                $job->update([
+                    'status' => 'processing',
+                    'provider_reference' => $result['providerReference'] ?? null,
+                    'error_message' => $result['message'] ?? 'Manual payout pending.',
+                ]);
+
+                Log::info('[PayoutJob] Waiting for manual processing', [
+                    'job_id' => $job->id,
+                    'reference' => $job->reference,
+                ]);
+
+                return;
+            }
+
             $job->update([
                 'status' => 'completed',
                 'provider_reference' => $result['providerReference'] ?? null,
                 'completed_at' => now(),
+            ]);
+
+            $job->escrowSplit?->update([
+                'status' => 'paid',
+                'paid_at' => now(),
             ]);
 
             Log::info('[PayoutJob] Completed', [
@@ -96,10 +116,18 @@ class ProcessPayoutJob implements ShouldQueue
                 'attempt' => $job->attempts,
             ]);
 
+            $finalFailure = $job->attempts >= $this->tries;
+
             $job->update([
-                'status' => $job->attempts >= $this->tries ? 'failed' : 'queued',
+                'status' => $finalFailure ? 'failed' : 'queued',
                 'error_message' => $e->getMessage(),
             ]);
+
+            if ($finalFailure) {
+                $job->escrowSplit?->update([
+                    'status' => 'failed',
+                ]);
+            }
 
             if ($job->attempts < $this->tries) {
                 throw $e; // Laravel re-queues automatically with backoff

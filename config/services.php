@@ -48,4 +48,11 @@ return [
         'callback_secret' => env('PAYMENT_CALLBACK_SECRET'),
     ],
 
+    'toms' => [
+        'internal_key' => env('TOMS_INTERNAL_KEY'),
+    ],
+
+    'rick' => [
+        'token' => env('RICK_CONNECTOR_TOKEN'),
+    ],
 ];

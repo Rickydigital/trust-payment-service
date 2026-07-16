@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class PaymentTransaction extends Model
@@ -42,5 +43,10 @@ class PaymentTransaction extends Model
     public function escrowWallet(): HasOne
     {
         return $this->hasOne(EscrowWallet::class, 'transaction_id');
+    }
+
+    public function escrowWallets(): HasMany
+    {
+        return $this->hasMany(EscrowWallet::class, 'transaction_id');
     }
 }
