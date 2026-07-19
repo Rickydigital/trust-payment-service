@@ -199,10 +199,22 @@ class ClickPesaDriver implements PaymentDriverInterface
             ];
         }
 
+        $orderReference = preg_replace('/[^A-Za-z0-9]/', '', (string) $payload['orderReference']);
+
+        if ($orderReference === '') {
+            return [
+                'ok' => false,
+                'providerReference' => null,
+                'status' => 'failed',
+                'message' => 'Invalid Order Reference, should only contain alphanumeric characters and cannot be blank.',
+                'raw' => [],
+            ];
+        }
+
         $body = [
             'amount'         => (string) $payload['amount'],
             'currency'       => (string) $payload['currency'],
-            'orderReference' => (string) $payload['orderReference'],
+            'orderReference' => $orderReference,
             'phoneNumber'    => $phoneNumber,
         ];
 

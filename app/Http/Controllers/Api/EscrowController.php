@@ -401,7 +401,7 @@ class EscrowController extends Controller
     private function makePayoutReference(): string
     {
         do {
-            $candidate = 'POUT-' . now()->format('Ymd') . '-' . strtoupper(Str::random(6));
+            $candidate = 'POUT' . now()->format('Ymd') . strtoupper(Str::random(6));
         } while (PayoutJob::where('reference', $candidate)->exists());
 
         return $candidate;
