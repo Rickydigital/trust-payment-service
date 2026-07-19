@@ -297,11 +297,44 @@ class WalletController extends Controller
 
     private function normalizeAccount(array $account): array
     {
-        if (($account['method'] ?? null) === 'mobile' && empty($account['phone'])) {
-            $account['phone'] = $account['mobile_phone'] ?? null;
+        if (($account['method'] ?? null) === 'mobile') {
+            $phone = $this->normalizePhone(
+                $account['phone']
+                    ?? $account['mobile_phone']
+                    ?? $account['account_number']
+                    ?? null
+            );
+
+            if (! $phone) {
+                throw ValidationException::withMessages([
+                    'payout_account.phone' => 'Valid payout phone number is required. Use 07XXXXXXXX or 2557XXXXXXXX.',
+                ]);
+            }
+
+            $account['phone'] = $phone;
+            $account['mobile_phone'] = $phone;
         }
 
         return $account;
+    }
+
+    private function normalizePhone(?string $phone): ?string
+    {
+        $digits = preg_replace('/\D+/', '', (string) $phone);
+
+        if (str_starts_with($digits, '255') && strlen($digits) === 12) {
+            return $digits;
+        }
+
+        if (strlen($digits) === 10 && str_starts_with($digits, '0')) {
+            return '255' . substr($digits, 1);
+        }
+
+        if (strlen($digits) === 9 && (str_starts_with($digits, '6') || str_starts_with($digits, '7'))) {
+            return '255' . $digits;
+        }
+
+        return null;
     }
 
     private function validateOwnerType(string $ownerType): void

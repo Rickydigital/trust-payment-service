@@ -48,9 +48,11 @@ class ProcessPayoutJob implements ShouldQueue
                 ?? $account['account_number']
                 ?? null;
 
+            $phone = $this->normalizePhone($phone);
+
             if (! $phone) {
                 throw new \RuntimeException(
-                    "No phone number found for payout job {$job->id}"
+                    "Valid payout phone number is required for payout job {$job->id}. Use 07XXXXXXXX or 2557XXXXXXXX."
                 );
             }
 
@@ -150,6 +152,25 @@ class ProcessPayoutJob implements ShouldQueue
         $encoded = json_encode($message, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         return $encoded ?: 'Payout driver returned an unreadable message.';
+    }
+
+    private function normalizePhone(mixed $phone): ?string
+    {
+        $digits = preg_replace('/\D+/', '', (string) $phone);
+
+        if (str_starts_with($digits, '255') && strlen($digits) === 12) {
+            return $digits;
+        }
+
+        if (strlen($digits) === 10 && str_starts_with($digits, '0')) {
+            return '255' . substr($digits, 1);
+        }
+
+        if (strlen($digits) === 9 && (str_starts_with($digits, '6') || str_starts_with($digits, '7'))) {
+            return '255' . $digits;
+        }
+
+        return null;
     }
 
     private function checkWalletCompletion(PayoutJob $job): void

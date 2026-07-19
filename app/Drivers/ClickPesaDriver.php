@@ -187,11 +187,23 @@ class ClickPesaDriver implements PaymentDriverInterface
             }
         }
 
+        $phoneNumber = $this->normalizePhone($payload['phoneNumber']);
+
+        if (! $phoneNumber) {
+            return [
+                'ok' => false,
+                'providerReference' => null,
+                'status' => 'failed',
+                'message' => 'Valid phoneNumber is required, must start with country code and without the plus sign.',
+                'raw' => [],
+            ];
+        }
+
         $body = [
             'amount'         => (string) $payload['amount'],
             'currency'       => (string) $payload['currency'],
             'orderReference' => (string) $payload['orderReference'],
-            'phoneNumber'    => (string) $payload['phoneNumber'],
+            'phoneNumber'    => $phoneNumber,
         ];
 
         $checksum = $this->checksum($body);
@@ -325,6 +337,25 @@ class ClickPesaDriver implements PaymentDriverInterface
         $encoded = json_encode($message, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         return $encoded ?: 'ClickPesa returned an unreadable message.';
+    }
+
+    private function normalizePhone(mixed $phone): ?string
+    {
+        $digits = preg_replace('/\D+/', '', (string) $phone);
+
+        if (str_starts_with($digits, '255') && strlen($digits) === 12) {
+            return $digits;
+        }
+
+        if (strlen($digits) === 10 && str_starts_with($digits, '0')) {
+            return '255' . substr($digits, 1);
+        }
+
+        if (strlen($digits) === 9 && (str_starts_with($digits, '6') || str_starts_with($digits, '7'))) {
+            return '255' . $digits;
+        }
+
+        return null;
     }
 
     private function extractStatus(array $payload): ?string
