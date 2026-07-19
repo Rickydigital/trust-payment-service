@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\PaymentMethod;
+use App\Models\PaymentProvider;
 use Illuminate\Database\Seeder;
 
 class PaymentMethodSeeder extends Seeder
@@ -73,6 +74,31 @@ class PaymentMethodSeeder extends Seeder
         ];
 
         foreach ($methods as $method) {
+            $driverClass = $method['driver_class'];
+            $driverExists = class_exists($driverClass);
+
+            $provider = PaymentProvider::updateOrCreate(
+                ['key' => $method['provider_key']],
+                [
+                    'name' => $method['display_name'],
+                    'environment' => env('APP_ENV', 'local'),
+                    'base_url' => $method['config']['base_url'] ?? null,
+                    'status' => $method['is_active'] ? 'active' : 'disabled',
+                    'health_status' => $driverExists ? 'unknown' : 'driver_missing',
+                    'supports_collection' => $method['type'] !== 'bank' && ! str_contains(strtolower($driverClass), 'manualpayout'),
+                    'supports_payout' => $driverExists && method_exists($driverClass, 'payout'),
+                    'supports_refund' => $driverExists && method_exists($driverClass, 'refund'),
+                    'supports_webhook' => $driverExists && method_exists($driverClass, 'verifyWebhook'),
+                    'is_active' => $method['is_active'],
+                    'metadata' => [
+                        'seeded_by' => self::class,
+                        'driver_class' => $driverClass,
+                    ],
+                ]
+            );
+
+            $method['payment_provider_id'] = $provider->id;
+
             PaymentMethod::updateOrCreate(
                 ['provider_key' => $method['provider_key']],
                 $method

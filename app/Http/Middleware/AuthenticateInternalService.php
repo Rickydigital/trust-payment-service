@@ -17,9 +17,17 @@ class AuthenticateInternalService
     public function handle(Request $request, Closure $next): Response
     {
         $provided = (string) $request->header('X-Internal-Key', '');
-        $expected = (string) config('services.main_platform.internal_key');
+        $expectedKeys = collect([
+            config('services.main_platform.internal_key'),
+            config('services.toms.internal_key'),
+            env('MAIN_PLATFORM_INTERNAL_KEY'),
+            env('TRUST_MAIN_INTERNAL_KEY'),
+            env('PAYMENT_SERVICE_INTERNAL_KEY'),
+            env('TOMS_INTERNAL_KEY'),
+            env('INTERNAL_SERVICE_KEY'),
+        ])->filter()->values();
 
-        if (! $expected || ! $provided || ! hash_equals($expected, $provided)) {
+        if (! $provided || $expectedKeys->isEmpty() || ! $expectedKeys->contains(fn ($key) => hash_equals((string) $key, $provided))) {
             return response()->json([
                 'success' => false,
                 'message' => 'Unauthorized.',

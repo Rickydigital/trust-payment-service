@@ -24,9 +24,15 @@ class AuthenticateInternalOrDelegated
     public function handle(Request $request, Closure $next): Response
     {
         $internalKey = (string) $request->header('X-Internal-Key', '');
-        $expectedInternalKey = (string) config('services.main_platform.internal_key');
+        $expectedInternalKeys = collect([
+            config('services.main_platform.internal_key'),
+            env('MAIN_PLATFORM_INTERNAL_KEY'),
+            env('TRUST_MAIN_INTERNAL_KEY'),
+            env('PAYMENT_SERVICE_INTERNAL_KEY'),
+            env('INTERNAL_SERVICE_KEY'),
+        ])->filter()->values();
 
-        if ($internalKey && $expectedInternalKey && hash_equals($expectedInternalKey, $internalKey)) {
+        if ($internalKey && $expectedInternalKeys->contains(fn ($key) => hash_equals((string) $key, $internalKey))) {
             $request->attributes->set('is_internal_call', true);
             return $next($request);
         }

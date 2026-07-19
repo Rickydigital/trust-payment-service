@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Contracts\PaymentDriverInterface;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class PaymentMethod extends Model
@@ -12,6 +13,7 @@ class PaymentMethod extends Model
     use HasFactory;
 
     protected $fillable = [
+        'payment_provider_id',
         'provider_key',
         'display_name',
         'logo_url',
@@ -23,6 +25,7 @@ class PaymentMethod extends Model
     ];
 
     protected $casts = [
+        'payment_provider_id' => 'integer',
         'config' => 'encrypted:array',
         'is_active' => 'boolean',
         'sort_order' => 'integer',
@@ -39,6 +42,11 @@ class PaymentMethod extends Model
     public function transactions(): HasMany
     {
         return $this->hasMany(PaymentTransaction::class);
+    }
+
+    public function provider(): BelongsTo
+    {
+        return $this->belongsTo(PaymentProvider::class, 'payment_provider_id');
     }
 
     public function driver(): PaymentDriverInterface

@@ -296,7 +296,7 @@ class ClickPesaDriver implements PaymentDriverInterface
         if (! $res->successful()) {
             return [
                 'ok' => false,
-                'message' => $body['message'] ?? $body['error'] ?? $res->body() ?? $fallbackError,
+                'message' => $this->messageFrom($body['message'] ?? $body['error'] ?? $res->body() ?? $fallbackError),
                 'data' => $body,
                 'status' => $res->status(),
             ];
@@ -304,10 +304,27 @@ class ClickPesaDriver implements PaymentDriverInterface
 
         return [
             'ok' => true,
-            'message' => $body['message'] ?? $successMessage,
+            'message' => $this->messageFrom($body['message'] ?? $successMessage),
             'data' => $body,
             'status' => $res->status(),
         ];
+    }
+
+    private function messageFrom(mixed $message): string
+    {
+        if (is_string($message)) {
+            return trim($message) !== '' ? $message : 'ClickPesa returned an empty message.';
+        }
+
+        if (is_scalar($message) || $message === null) {
+            $text = trim((string) $message);
+
+            return $text !== '' ? $text : 'ClickPesa returned no message.';
+        }
+
+        $encoded = json_encode($message, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        return $encoded ?: 'ClickPesa returned an unreadable message.';
     }
 
     private function extractStatus(array $payload): ?string

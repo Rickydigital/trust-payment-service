@@ -73,7 +73,7 @@ class ProcessPayoutJob implements ShouldQueue
 
             if (! ($result['ok'] ?? false)) {
                 throw new \RuntimeException(
-                    $result['message'] ?? 'Payout driver returned failure.'
+                    $this->messageFrom($result['message'] ?? 'Payout driver returned failure.')
                 );
             }
 
@@ -81,7 +81,7 @@ class ProcessPayoutJob implements ShouldQueue
                 $job->update([
                     'status' => 'processing',
                     'provider_reference' => $result['providerReference'] ?? null,
-                    'error_message' => $result['message'] ?? 'Manual payout pending.',
+                    'error_message' => $this->messageFrom($result['message'] ?? 'Manual payout pending.'),
                 ]);
 
                 Log::info('[PayoutJob] Waiting for manual processing', [
@@ -133,6 +133,23 @@ class ProcessPayoutJob implements ShouldQueue
                 throw $e; // Laravel re-queues automatically with backoff
             }
         }
+    }
+
+    private function messageFrom(mixed $message): string
+    {
+        if (is_string($message)) {
+            return trim($message) !== '' ? $message : 'Payout driver returned an empty message.';
+        }
+
+        if (is_scalar($message) || $message === null) {
+            $text = trim((string) $message);
+
+            return $text !== '' ? $text : 'Payout driver returned no message.';
+        }
+
+        $encoded = json_encode($message, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        return $encoded ?: 'Payout driver returned an unreadable message.';
     }
 
     private function checkWalletCompletion(PayoutJob $job): void

@@ -57,6 +57,12 @@ class PaymentController extends Controller
         ]);
     }
 
+    if ($method->provider && ! $method->provider->is_active) {
+        throw ValidationException::withMessages([
+            'provider_key' => 'This payment provider is not currently available.',
+        ]);
+    }
+
     if ($method->type === 'mobile_money' && empty($data['payer_phone'])) {
         throw ValidationException::withMessages([
             'payer_phone' => 'Phone number is required for this payment method.',

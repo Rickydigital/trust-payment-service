@@ -19,6 +19,7 @@ class PaymentRouter
             "payment_method_{$providerKey}",
             now()->addMinutes(10),
             fn () => PaymentMethod::query()
+                ->with('provider')
                 ->where('provider_key', $providerKey)
                 ->first()
         );
@@ -70,7 +71,11 @@ class PaymentRouter
             'payment_methods_active',
             now()->addMinutes(10),
             fn () => PaymentMethod::query()
+                ->with('provider')
                 ->where('is_active', true)
+                ->where(fn ($query) => $query
+                    ->whereNull('payment_provider_id')
+                    ->orWhereHas('provider', fn ($providerQuery) => $providerQuery->where('is_active', true)))
                 ->orderBy('sort_order')
                 ->get()
         );
