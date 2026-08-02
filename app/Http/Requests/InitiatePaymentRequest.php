@@ -29,21 +29,27 @@ class InitiatePaymentRequest extends FormRequest
             // Needed later by POST /escrow/release to calculate seller vs
             // delivery vs platform splits. Optional because not every
             // payment is for a marketplace order with shipping (e.g. a
-            // Trust Deal escrow funding has no shipping_fee concept).
+            // Trada Deal escrow funding has no shipping_fee concept).
             'subtotal' => ['nullable', 'numeric', 'min:0'],
             'shipping_fee' => ['nullable', 'numeric', 'min:0'],
+            'discount_amount' => ['nullable', 'numeric', 'min:0'],
+            'coupon_code' => ['nullable', 'string', 'max:40'],
+            'coupon_id' => ['nullable', 'integer'],
+            'referral_code' => ['nullable', 'string', 'max:40'],
             'order_splits' => ['nullable', 'array'],
             'order_splits.*.order_reference' => ['required_with:order_splits', 'string', 'max:64'],
             'order_splits.*.amount' => ['required_with:order_splits', 'numeric', 'min:0'],
             'order_splits.*.subtotal' => ['nullable', 'numeric', 'min:0'],
             'order_splits.*.shipping_fee' => ['nullable', 'numeric', 'min:0'],
+            'order_splits.*.discount_amount' => ['nullable', 'numeric', 'min:0'],
+            'order_splits.*.coupon_code' => ['nullable', 'string', 'max:40'],
             'order_splits.*.seller_id' => ['nullable', 'string', 'max:80'],
             'order_splits.*.delivery_service_id' => ['nullable', 'string', 'max:80'],
             'order_splits.*.delivery_required' => ['nullable', 'boolean'],
 
             // Seller identity + payout account, needed to build the
             // escrow_splits row for this order's seller.
-            // Seller payout account, accepted as a pre-built array —
+            // Seller payout account, accepted as a pre-built array â€”
             // matches the shape the main platform's PaymentService sends
             // server-to-server (method/account_name/account_number/
             // mobile_network/mobile_phone/bank_name). Flat fields are

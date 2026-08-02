@@ -231,8 +231,13 @@ class EscrowController extends Controller
 
             foreach ($wallet->splits->where('recipient_type', $recipientType) as $split) {
                 $identityUpdates = [];
-                if (! empty($data['recipient_id']) && empty($split->recipient_id)) {
-                    $identityUpdates['recipient_id'] = $data['recipient_id'];
+                if (! empty($data['recipient_id'])) {
+                    $shouldUpdateRecipient = empty($split->recipient_id)
+                        || ($recipientType === 'delivery_service' && (string) $split->recipient_id !== (string) $data['recipient_id']);
+
+                    if ($shouldUpdateRecipient) {
+                        $identityUpdates['recipient_id'] = $data['recipient_id'];
+                    }
                 }
                 if (! empty($data['recipient_account']) && empty($split->recipient_account)) {
                     $identityUpdates['recipient_account'] = $data['recipient_account'];

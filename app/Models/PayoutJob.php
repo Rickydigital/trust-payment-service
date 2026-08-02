@@ -21,17 +21,30 @@ class PayoutJob extends Model
         'provider_key',
         'status',
         'provider_reference',
+        'provider_message',
+        'provider_request',
+        'provider_response',
         'attempts',
         'last_attempted_at',
         'completed_at',
         'error_message',
+        'held_reason',
+        'held_by',
+        'held_at',
+        'released_by',
+        'released_at',
+        'manually_completed_by',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
+        'provider_request' => 'array',
+        'provider_response' => 'array',
         'attempts' => 'integer',
         'last_attempted_at' => 'datetime',
         'completed_at' => 'datetime',
+        'held_at' => 'datetime',
+        'released_at' => 'datetime',
     ];
 
     public function escrowSplit(): BelongsTo

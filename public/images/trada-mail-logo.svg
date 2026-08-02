@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="92" viewBox="0 0 380 92" role="img" aria-labelledby="title desc">
+  <title id="title">Trada</title>
+  <desc id="desc">Trada company logo for email templates</desc>
+  <rect width="380" height="92" rx="22" fill="#052E25"/>
+  <rect x="20" y="18" width="56" height="56" rx="16" fill="#16C95B"/>
+  <path d="M36 38h24M48 38v28M34 30h28" stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="92" y="43" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="27" font-weight="800">Trada</text>
+  <text x="94" y="64" fill="#cbd5e1" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600">Secure marketplace and delivery</text>
+</svg>

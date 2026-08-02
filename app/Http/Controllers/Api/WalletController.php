@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Jobs\ProcessPayoutJob;
 use App\Models\EscrowSplit;
 use App\Models\PayoutJob;
+use App\Models\PaymentMethod;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -192,6 +193,7 @@ class WalletController extends Controller
         ]);
 
         $this->validateOwnerType($data['owner_type']);
+        $this->ensurePayoutMethod($data['provider_key']);
 
         return $data;
     }
@@ -342,6 +344,35 @@ class WalletController extends Controller
         if (! in_array($ownerType, ['seller', 'delivery_service', 'user'], true)) {
             throw ValidationException::withMessages([
                 'owner_type' => 'Invalid wallet owner type.',
+            ]);
+        }
+    }
+
+    private function ensurePayoutMethod(string $providerKey): void
+    {
+        $method = PaymentMethod::query()
+            ->with('provider')
+            ->where('provider_key', $providerKey)
+            ->where('is_active', true)
+            ->first();
+
+        if (! $method) {
+            throw ValidationException::withMessages([
+                'provider_key' => 'This payout provider is not available.',
+            ]);
+        }
+
+        $provider = $method->provider;
+
+        if ($provider && (! $provider->is_active || ! $provider->supports_payout)) {
+            throw ValidationException::withMessages([
+                'provider_key' => 'This provider does not support payouts right now.',
+            ]);
+        }
+
+        if (! $provider && (! class_exists((string) $method->driver_class) || ! method_exists((string) $method->driver_class, 'payout'))) {
+            throw ValidationException::withMessages([
+                'provider_key' => 'This provider does not support payouts right now.',
             ]);
         }
     }

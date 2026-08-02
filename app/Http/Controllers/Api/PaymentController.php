@@ -34,13 +34,16 @@ class PaymentController extends Controller
                 'logo_url'     => $m->logo_url,
                 'type'         => $m->type,
                 'sort_order'   => $m->sort_order,
+                'supports_collection' => (bool) ($m->provider?->supports_collection ?? $m->type !== 'bank'),
+                'supports_payout' => (bool) ($m->provider?->supports_payout ?? method_exists((string) $m->driver_class, 'payout')),
+                'supports_refund' => (bool) ($m->provider?->supports_refund ?? method_exists((string) $m->driver_class, 'refund')),
             ]),
         ]);
     }
 
-    // ─────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // POST /initiate
-    // ─────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public function initiate(InitiatePaymentRequest $request): JsonResponse
 {
@@ -105,6 +108,10 @@ class PaymentController extends Controller
                 'source_service' => $data['source_service'] ?? 'trust',
                 'subtotal' => $data['subtotal'] ?? null,
                 'shipping_fee' => $data['shipping_fee'] ?? null,
+                'discount_amount' => $data['discount_amount'] ?? null,
+                'coupon_code' => $data['coupon_code'] ?? null,
+                'coupon_id' => $data['coupon_id'] ?? null,
+                'referral_code' => $data['referral_code'] ?? null,
                 'order_splits' => $this->normalizeOrderSplits($data),
                 'seller_id' => $data['seller_id'] ?? null,
                 'seller_payout_account' => $this->buildSellerPayoutAccount($data),
@@ -221,9 +228,9 @@ public function attempts(Request $request, string $orderReference): JsonResponse
     ]);
 }
 
-    // ─────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // GET /status/{transaction_reference}
-    // ─────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public function status(Request $request, string $transactionReference): JsonResponse
     {
@@ -250,7 +257,7 @@ public function attempts(Request $request, string $orderReference): JsonResponse
 
         $previousStatus = $transaction->status;
 
-        // Terminal states never change — no point re-querying the provider.
+        // Terminal states never change â€” no point re-querying the provider.
         if (in_array($transaction->status, ['pending', 'initiated'], true) && $transaction->provider_reference) {
             $transaction = $this->refreshFromProvider($transaction);
         }
@@ -272,6 +279,10 @@ public function attempts(Request $request, string $orderReference): JsonResponse
             'provider_key' => $transaction->paymentMethod->provider_key,
             'payment_context' => $transaction->metadata['payment_context'] ?? null,
             'source_service' => $transaction->metadata['source_service'] ?? null,
+            'discount_amount' => $transaction->metadata['discount_amount'] ?? null,
+            'coupon_code' => $transaction->metadata['coupon_code'] ?? null,
+            'coupon_id' => $transaction->metadata['coupon_id'] ?? null,
+            'referral_code' => $transaction->metadata['referral_code'] ?? null,
             'created_at' => $transaction->created_at,
             'confirmed_at' => $transaction->confirmed_at,
         ]);
@@ -283,7 +294,7 @@ public function attempts(Request $request, string $orderReference): JsonResponse
             $driver = $this->router->driverFor($transaction->paymentMethod);
             $result = $driver->queryStatus($transaction->provider_reference);
         } catch (\Throwable $e) {
-            // Provider query failed — fall back to whatever we already
+            // Provider query failed â€” fall back to whatever we already
             // have in the DB rather than surfacing a 500 to the buyer
             // who is just polling for status.
             return $transaction;
@@ -411,6 +422,8 @@ public function attempts(Request $request, string $orderReference): JsonResponse
                 'amount' => round((float) ($split['amount'] ?? 0), 2),
                 'subtotal' => round((float) ($split['subtotal'] ?? 0), 2),
                 'shipping_fee' => round((float) ($split['shipping_fee'] ?? 0), 2),
+                'discount_amount' => round((float) ($split['discount_amount'] ?? 0), 2),
+                'coupon_code' => isset($split['coupon_code']) ? (string) $split['coupon_code'] : null,
                 'seller_id' => isset($split['seller_id']) ? (string) $split['seller_id'] : null,
                 'delivery_service_id' => isset($split['delivery_service_id']) ? (string) $split['delivery_service_id'] : null,
                 'delivery_required' => filter_var($split['delivery_required'] ?? true, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? true,
@@ -492,6 +505,10 @@ public function attempts(Request $request, string $orderReference): JsonResponse
             'provider_type' => $transaction->paymentMethod?->type,
             'payment_context' => $transaction->metadata['payment_context'] ?? null,
             'source_service' => $transaction->metadata['source_service'] ?? null,
+            'discount_amount' => $transaction->metadata['discount_amount'] ?? null,
+            'coupon_code' => $transaction->metadata['coupon_code'] ?? null,
+            'coupon_id' => $transaction->metadata['coupon_id'] ?? null,
+            'referral_code' => $transaction->metadata['referral_code'] ?? null,
         ];
 
         $signature = hash_hmac(

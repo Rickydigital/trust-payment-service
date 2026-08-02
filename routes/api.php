@@ -55,6 +55,9 @@ Route::prefix('/internal/toms/payment')->group(function () {
     Route::get('/escrow', [InternalTomsPaymentOperationsController::class, 'escrow']);
     Route::get('/payouts', [InternalTomsPaymentOperationsController::class, 'payouts']);
     Route::post('/payouts/{reference}/retry', [InternalTomsPaymentOperationsController::class, 'retryPayout']);
+    Route::post('/payouts/{reference}/hold', [InternalTomsPaymentOperationsController::class, 'holdPayout']);
+    Route::post('/payouts/{reference}/release', [InternalTomsPaymentOperationsController::class, 'releasePayout']);
+    Route::post('/payouts/{reference}/complete', [InternalTomsPaymentOperationsController::class, 'completePayout']);
     Route::get('/refunds', [InternalTomsPaymentOperationsController::class, 'refunds']);
     Route::post('/refunds/{reference}/approve', [InternalTomsPaymentOperationsController::class, 'approveRefund']);
     Route::post('/refunds/{reference}/reject', [InternalTomsPaymentOperationsController::class, 'rejectRefund']);

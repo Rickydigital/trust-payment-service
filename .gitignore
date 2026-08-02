@@ -22,3 +22,10 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Local agent and scratch artifacts
+/.agents/
+/.codex/
+/tmp/
+/temp/
+**/~$*

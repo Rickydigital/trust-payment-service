@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Log;
 
 class ProcessPayoutJob implements ShouldQueue
@@ -29,7 +30,7 @@ class ProcessPayoutJob implements ShouldQueue
             return;
         }
 
-        if ($job->status === 'completed') {
+        if (in_array($job->status, ['completed', 'held'], true)) {
             return; // already done — duplicate dispatch, safe to ignore
         }
 
@@ -37,7 +38,11 @@ class ProcessPayoutJob implements ShouldQueue
             'status' => 'processing',
             'attempts' => $job->attempts + 1,
             'last_attempted_at' => now(),
+            'error_message' => null,
         ]);
+
+        $providerRequest = null;
+        $providerResponse = null;
 
         try {
             $driver = $router->driver($job->provider_key);
@@ -66,11 +71,21 @@ class ProcessPayoutJob implements ShouldQueue
                 );
             }
 
-            $result = $driver->payout([
+            $providerRequest = [
                 'amount' => (float) $job->amount,
                 'currency' => $job->currency,
                 'orderReference' => $job->reference,
                 'phoneNumber' => $phone,
+            ];
+
+            $job->update(['provider_request' => $providerRequest]);
+
+            $result = $driver->payout($providerRequest);
+            $providerResponse = $this->sanitizeProviderResponse($result);
+
+            $job->update([
+                'provider_response' => $providerResponse,
+                'provider_message' => $this->messageFrom($result['message'] ?? null),
             ]);
 
             if (! ($result['ok'] ?? false)) {
@@ -81,9 +96,10 @@ class ProcessPayoutJob implements ShouldQueue
 
             if (($result['manual_review'] ?? false) || ($result['status'] ?? null) === 'manual_review') {
                 $job->update([
-                    'status' => 'processing',
+                    'status' => 'manual_review',
                     'provider_reference' => $result['providerReference'] ?? null,
-                    'error_message' => $this->messageFrom($result['message'] ?? 'Manual payout pending.'),
+                    'provider_message' => $this->messageFrom($result['message'] ?? 'Manual payout pending.'),
+                    'error_message' => null,
                 ]);
 
                 Log::info('[PayoutJob] Waiting for manual processing', [
@@ -97,6 +113,8 @@ class ProcessPayoutJob implements ShouldQueue
             $job->update([
                 'status' => 'completed',
                 'provider_reference' => $result['providerReference'] ?? null,
+                'provider_message' => $this->messageFrom($result['message'] ?? 'Payout completed.'),
+                'error_message' => null,
                 'completed_at' => now(),
             ]);
 
@@ -123,6 +141,9 @@ class ProcessPayoutJob implements ShouldQueue
             $job->update([
                 'status' => $finalFailure ? 'failed' : 'queued',
                 'error_message' => $e->getMessage(),
+                'provider_request' => $providerRequest ?? $job->provider_request,
+                'provider_response' => $providerResponse ?? $job->provider_response,
+                'provider_message' => $e->getMessage(),
             ]);
 
             if ($finalFailure) {
@@ -152,6 +173,22 @@ class ProcessPayoutJob implements ShouldQueue
         $encoded = json_encode($message, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         return $encoded ?: 'Payout driver returned an unreadable message.';
+    }
+
+    private function sanitizeProviderResponse(mixed $response): array
+    {
+        if (! is_array($response)) {
+            return ['value' => $this->messageFrom($response)];
+        }
+
+        return Arr::except($response, [
+            'access_token',
+            'authorization',
+            'client_secret',
+            'password',
+            'secret',
+            'token',
+        ]);
     }
 
     private function normalizePhone(mixed $phone): ?string

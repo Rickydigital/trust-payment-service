@@ -53,7 +53,7 @@ class TomsPaymentOperationsController extends Controller
                     ['label' => 'Pending Payments', 'value' => (clone $transactions)->whereIn('status', ['initiated', 'pending'])->count(), 'icon' => 'mdi-timer-sand'],
                     ['label' => 'Failed Payments', 'value' => (clone $transactions)->where('status', 'failed')->count(), 'icon' => 'mdi-alert-circle-outline'],
                     ['label' => 'Escrow Holding', 'value' => (float) (clone $escrow)->where('status', 'holding')->sum('amount'), 'currency' => 'TZS', 'icon' => 'mdi-lock-outline'],
-                    ['label' => 'Pending Payouts', 'value' => (clone $payouts)->whereIn('status', ['pending', 'processing', 'manual_review'])->count(), 'icon' => 'mdi-bank-transfer-out'],
+                    ['label' => 'Pending Payouts', 'value' => (clone $payouts)->whereIn('status', ['queued', 'pending', 'processing', 'manual_review', 'held'])->count(), 'icon' => 'mdi-bank-transfer-out'],
                     ['label' => 'Failed Payouts', 'value' => (clone $payouts)->where('status', 'failed')->count(), 'icon' => 'mdi-cash-remove'],
                     ['label' => 'Refund Requests', 'value' => (clone $refunds)->whereIn('status', ['requested', 'approved', 'processing', 'manual_review'])->count(), 'icon' => 'mdi-cash-refund'],
                     ['label' => 'Webhook Issues', 'value' => (clone $webhooks)->where(fn ($query) => $query->where('signature_valid', false)->orWhere('processing_status', 'failed'))->count(), 'icon' => 'mdi-webhook'],
@@ -430,7 +430,8 @@ class TomsPaymentOperationsController extends Controller
                     ->where('reference', 'like', $q)
                     ->orWhere('recipient_id', 'like', $q)
                     ->orWhere('provider_reference', 'like', $q)
-                    ->orWhere('error_message', 'like', $q));
+                    ->orWhere('error_message', 'like', $q)
+                    ->orWhereHas('escrowSplit.escrowWallet', fn ($wallet) => $wallet->where('order_reference', 'like', $q)));
             })
             ->latest()
             ->paginate((int) $request->query('per_page', 10))
@@ -575,7 +576,9 @@ class TomsPaymentOperationsController extends Controller
                 'completed_reason' => $data['reason'],
                 'completed_at' => now()->toDateTimeString(),
             ]),
+            'provider_message' => 'Manually completed in TOMS: ' . $data['reason'],
             'failure_reason' => null,
+            'manually_completed_by' => $data['actor'] ?? null,
             'completed_at' => now(),
         ]);
 
@@ -588,20 +591,155 @@ class TomsPaymentOperationsController extends Controller
     {
         $this->authorizeInternal($request);
 
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'max:1000'],
+            'actor' => ['nullable', 'string', 'max:255'],
+        ]);
+
         $payout = PayoutJob::query()->where('reference', $reference)->firstOrFail();
 
-        if (! in_array($payout->status, ['failed', 'pending', 'manual_review'], true)) {
-            return response()->json(['message' => 'Only failed, pending, or manual review payouts can be retried.'], 422);
+        if (! in_array($payout->status, ['failed', 'queued', 'pending', 'manual_review', 'held'], true)) {
+            return response()->json(['message' => 'Only failed, queued, pending, held, or manual review payouts can be retried.'], 422);
         }
 
         $payout->update([
-            'status' => 'pending',
+            'status' => 'queued',
             'error_message' => null,
+            'provider_message' => 'Retry queued by TOMS: ' . $data['reason'],
+            'held_reason' => null,
+            'held_by' => null,
+            'held_at' => null,
+            'released_by' => $data['actor'] ?? null,
+            'released_at' => now(),
+            'provider_response' => array_merge($payout->provider_response ?? [], [
+                'last_toms_action' => [
+                    'action' => 'retry',
+                    'actor' => $data['actor'] ?? null,
+                    'reason' => $data['reason'],
+                    'at' => now()->toDateTimeString(),
+                ],
+            ]),
         ]);
 
         ProcessPayoutJob::dispatch($payout->id)->onQueue('payments');
 
-        return response()->json(['data' => ['payout' => $this->payoutRow($payout->fresh())]]);
+        return response()->json(['data' => ['payout' => $this->payoutRow($payout->fresh('escrowSplit.escrowWallet'))]]);
+    }
+
+    public function holdPayout(Request $request, string $reference): JsonResponse
+    {
+        $this->authorizeInternal($request);
+
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'max:1000'],
+            'actor' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $payout = PayoutJob::query()->where('reference', $reference)->firstOrFail();
+
+        if (in_array($payout->status, ['completed', 'held'], true)) {
+            return response()->json(['message' => 'Completed payouts cannot be held and this payout may already be held.'], 422);
+        }
+
+        $payout->update([
+            'status' => 'held',
+            'held_reason' => $data['reason'],
+            'held_by' => $data['actor'] ?? null,
+            'held_at' => now(),
+            'provider_message' => 'Held by TOMS: ' . $data['reason'],
+            'provider_response' => array_merge($payout->provider_response ?? [], [
+                'last_toms_action' => [
+                    'action' => 'hold',
+                    'actor' => $data['actor'] ?? null,
+                    'reason' => $data['reason'],
+                    'at' => now()->toDateTimeString(),
+                ],
+            ]),
+        ]);
+
+        return response()->json(['data' => ['payout' => $this->payoutRow($payout->fresh('escrowSplit.escrowWallet'))]]);
+    }
+
+    public function releasePayout(Request $request, string $reference): JsonResponse
+    {
+        $this->authorizeInternal($request);
+
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'max:1000'],
+            'actor' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $payout = PayoutJob::query()->where('reference', $reference)->firstOrFail();
+
+        if ($payout->status !== 'held') {
+            return response()->json(['message' => 'Only held payouts can be released.'], 422);
+        }
+
+        $payout->update([
+            'status' => 'queued',
+            'error_message' => null,
+            'held_reason' => null,
+            'held_by' => null,
+            'held_at' => null,
+            'released_by' => $data['actor'] ?? null,
+            'released_at' => now(),
+            'provider_message' => 'Released by TOMS: ' . $data['reason'],
+            'provider_response' => array_merge($payout->provider_response ?? [], [
+                'last_toms_action' => [
+                    'action' => 'release',
+                    'actor' => $data['actor'] ?? null,
+                    'reason' => $data['reason'],
+                    'at' => now()->toDateTimeString(),
+                ],
+            ]),
+        ]);
+
+        ProcessPayoutJob::dispatch($payout->id)->onQueue('payments');
+
+        return response()->json(['data' => ['payout' => $this->payoutRow($payout->fresh('escrowSplit.escrowWallet'))]]);
+    }
+
+    public function completePayout(Request $request, string $reference): JsonResponse
+    {
+        $this->authorizeInternal($request);
+
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'max:1000'],
+            'provider_reference' => ['nullable', 'string', 'max:120'],
+            'actor' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $payout = PayoutJob::query()
+            ->with('escrowSplit.escrowWallet.splits.payoutJob')
+            ->where('reference', $reference)
+            ->firstOrFail();
+
+        if (! in_array($payout->status, ['failed', 'queued', 'pending', 'processing', 'manual_review', 'held'], true)) {
+            return response()->json(['message' => 'This payout cannot be manually completed in its current status.'], 422);
+        }
+
+        $payout->update([
+            'status' => 'completed',
+            'provider_reference' => ($data['provider_reference'] ?? null) ?: $payout->provider_reference,
+            'provider_message' => 'Manually completed by TOMS: ' . $data['reason'],
+            'provider_response' => array_merge($payout->provider_response ?? [], [
+                'manual_completion' => [
+                    'completed_by' => $data['actor'] ?? null,
+                    'reason' => $data['reason'],
+                    'at' => now()->toDateTimeString(),
+                ],
+            ]),
+            'error_message' => null,
+            'held_reason' => null,
+            'held_by' => null,
+            'held_at' => null,
+            'manually_completed_by' => $data['actor'] ?? null,
+            'completed_at' => now(),
+        ]);
+
+        $this->markPayoutCompleted($payout->fresh('escrowSplit.escrowWallet.splits.payoutJob'));
+
+        return response()->json(['data' => ['payout' => $this->payoutRow($payout->fresh('escrowSplit.escrowWallet'))]]);
     }
 
     public function webhooks(Request $request): JsonResponse
@@ -674,12 +812,12 @@ class TomsPaymentOperationsController extends Controller
             ->get()
             ->map(fn (WebhookLog $webhook) => $this->reconciliationItem('webhook_issue', 'Webhook issue', $webhook->error_message ?: 'Webhook failed validation or processing.', $webhook->processing_status, $this->webhookRow($webhook)));
 
-        $failedPayouts = PayoutJob::query()
-            ->where('status', 'failed')
+        $payoutIssues = PayoutJob::query()
+            ->whereIn('status', ['failed', 'manual_review', 'held'])
             ->latest()
             ->limit(25)
             ->get()
-            ->map(fn (PayoutJob $payout) => $this->reconciliationItem('failed_payout', 'Failed payout', $payout->error_message ?: 'Payout failed and needs review.', $payout->status, $this->payoutRow($payout)));
+            ->map(fn (PayoutJob $payout) => $this->reconciliationItem('payout_issue', 'Payout issue', $payout->error_message ?: $payout->provider_message ?: $payout->held_reason ?: 'Payout needs review.', $payout->status, $this->payoutRow($payout)));
 
         $refundIssues = RefundRequest::query()
             ->whereIn('status', ['failed', 'manual_review'])
@@ -691,7 +829,7 @@ class TomsPaymentOperationsController extends Controller
         $items = $stalePending
             ->merge($missingReference)
             ->merge($failedWebhooks)
-            ->merge($failedPayouts)
+            ->merge($payoutIssues)
             ->merge($refundIssues)
             ->sortByDesc('occurred_at')
             ->values();
@@ -703,7 +841,7 @@ class TomsPaymentOperationsController extends Controller
                     'stale_pending_payments' => $stalePending->count(),
                     'missing_provider_references' => $missingReference->count(),
                     'webhook_issues' => $failedWebhooks->count(),
-                    'failed_payouts' => $failedPayouts->count(),
+                    'payout_issues' => $payoutIssues->count(),
                     'refund_issues' => $refundIssues->count(),
                     'total_issues' => $items->count(),
                 ],
@@ -921,12 +1059,21 @@ class TomsPaymentOperationsController extends Controller
             'currency' => $payout->currency,
             'provider_key' => $payout->provider_key,
             'provider_reference' => $payout->provider_reference,
+            'provider_message' => $payout->provider_message,
+            'provider_request' => $payout->provider_request ?? [],
+            'provider_response' => $payout->provider_response ?? [],
             'status' => $payout->status,
             'attempts' => $payout->attempts,
             'error_message' => $payout->error_message,
+            'held_reason' => $payout->held_reason,
+            'held_by' => $payout->held_by,
+            'released_by' => $payout->released_by,
+            'manually_completed_by' => $payout->manually_completed_by,
             'order_reference' => $payout->escrowSplit?->escrowWallet?->order_reference,
             'last_attempted_at' => optional($payout->last_attempted_at)->toDateTimeString(),
             'completed_at' => optional($payout->completed_at)->toDateTimeString(),
+            'held_at' => optional($payout->held_at)->toDateTimeString(),
+            'released_at' => optional($payout->released_at)->toDateTimeString(),
             'created_at' => optional($payout->created_at)->toDateTimeString(),
         ];
     }
@@ -946,18 +1093,60 @@ class TomsPaymentOperationsController extends Controller
             'currency' => $refund->currency,
             'provider_key' => $refund->provider_key ?: $refund->transaction?->paymentMethod?->provider_key,
             'provider_reference' => $refund->provider_reference,
+            'provider_request' => $refund->provider_request ?? [],
+            'provider_response' => $refund->provider_response ?? [],
+            'provider_message' => $refund->provider_message,
+            'callback_status' => $refund->callback_status,
+            'callback_response' => $refund->callback_response ?? [],
+            'callback_error' => $refund->callback_error,
             'status' => $refund->status,
             'reason' => $refund->reason,
             'review_note' => $refund->review_note,
             'failure_reason' => $refund->failure_reason,
+            'manually_completed_by' => $refund->manually_completed_by,
             'requested_at' => optional($refund->requested_at)->toDateTimeString(),
             'approved_at' => optional($refund->approved_at)->toDateTimeString(),
             'rejected_at' => optional($refund->rejected_at)->toDateTimeString(),
             'processed_at' => optional($refund->processed_at)->toDateTimeString(),
             'completed_at' => optional($refund->completed_at)->toDateTimeString(),
             'failed_at' => optional($refund->failed_at)->toDateTimeString(),
+            'callback_attempted_at' => optional($refund->callback_attempted_at)->toDateTimeString(),
             'created_at' => optional($refund->created_at)->toDateTimeString(),
         ];
+    }
+
+    private function markPayoutCompleted(PayoutJob $payout): void
+    {
+        $split = $payout->escrowSplit;
+
+        $split?->update([
+            'status' => 'paid',
+            'paid_at' => now(),
+        ]);
+
+        $wallet = $split?->escrowWallet;
+
+        if (! $wallet) {
+            return;
+        }
+
+        $splits = $wallet->splits()
+            ->whereNotNull('payout_job_id')
+            ->with('payoutJob')
+            ->get();
+
+        if ($splits->isEmpty()) {
+            return;
+        }
+
+        $allDone = $splits->every(fn (EscrowSplit $split) => $split->payoutJob?->status === 'completed');
+
+        if ($allDone && in_array($wallet->status, ['holding', 'releasing'], true)) {
+            $wallet->update([
+                'status' => 'released',
+                'released_at' => now(),
+            ]);
+        }
     }
 
     private function sendRefundCallback(RefundRequest $refund): void
@@ -967,7 +1156,7 @@ class TomsPaymentOperationsController extends Controller
         }
 
         try {
-            Http::withHeaders([
+            $response = Http::withHeaders([
                 'X-Internal-Key' => env('MAIN_PLATFORM_INTERNAL_KEY')
                     ?: env('TRUST_MAIN_INTERNAL_KEY')
                     ?: config('services.main_platform.internal_key')
@@ -986,7 +1175,23 @@ class TomsPaymentOperationsController extends Controller
                 'provider_reference' => $refund->provider_reference,
                 'failure_reason' => $refund->failure_reason,
             ]);
+
+            $refund->update([
+                'callback_attempted_at' => now(),
+                'callback_status' => $response->successful() ? 'sent' : 'failed',
+                'callback_response' => [
+                    'http_status' => $response->status(),
+                    'body' => Str::limit($response->body(), 2000),
+                ],
+                'callback_error' => $response->successful() ? null : Str::limit($response->body(), 1000),
+            ]);
         } catch (Throwable $exception) {
+            $refund->update([
+                'callback_attempted_at' => now(),
+                'callback_status' => 'failed',
+                'callback_error' => $exception->getMessage(),
+            ]);
+
             report($exception);
         }
     }
