@@ -24,7 +24,7 @@ class InitiatePaymentRequest extends FormRequest
             'payer_phone' => ['nullable', 'string', 'max:20'],
             'payer_name' => ['nullable', 'string', 'max:255'],
             'callback_url' => ['required', 'url', 'max:2048'],
-            'payment_context' => ['nullable', 'in:marketplace_order,trust_deal,delivery_fee,delivery_escrow'],
+            'payment_context' => ['nullable', 'in:marketplace_order,food_order,trust_deal,delivery_fee,delivery_escrow'],
             'source_service' => ['nullable', 'string', 'max:64'],
             // Needed later by POST /escrow/release to calculate seller vs
             // delivery vs platform splits. Optional because not every

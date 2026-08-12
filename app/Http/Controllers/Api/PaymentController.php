@@ -7,6 +7,7 @@ use App\Http\Requests\InitiatePaymentRequest;
 use App\Models\EscrowWallet;
 use App\Models\PaymentAttempt;
 use App\Models\PaymentTransaction;
+use App\Models\PayoutChannel;
 use App\Services\PaymentRouter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -38,6 +39,43 @@ class PaymentController extends Controller
                 'supports_payout' => (bool) ($m->provider?->supports_payout ?? method_exists((string) $m->driver_class, 'payout')),
                 'supports_refund' => (bool) ($m->provider?->supports_refund ?? method_exists((string) $m->driver_class, 'refund')),
             ]),
+        ]);
+    }
+
+    public function payoutOptions(): JsonResponse
+    {
+        $payoutMethods = $this->router->activeMethods()
+            ->filter(fn ($method): bool => (bool) (
+                $method->provider?->supports_payout
+                ?? method_exists((string) $method->driver_class, 'payout')
+            ));
+
+        $methodNames = $payoutMethods->mapWithKeys(
+            fn ($method): array => [$method->provider_key => $method->display_name],
+        );
+
+        $options = PayoutChannel::query()
+            ->where('is_active', true)
+            ->whereIn('provider_key', $methodNames->keys())
+            ->orderBy('sort_order')
+            ->orderBy('display_name')
+            ->get()
+            ->map(fn (PayoutChannel $channel): array => [
+                'provider_key' => $channel->provider_key,
+                'provider_name' => $methodNames->get($channel->provider_key),
+                'code' => $channel->code,
+                'display_name' => $channel->display_name,
+                'type' => $channel->type,
+                'country_code' => $channel->country_code,
+                'currency' => $channel->currency,
+                'logo_url' => $channel->logo_url,
+                'phone_hint' => $channel->phone_hint,
+            ])
+            ->values();
+
+        return response()->json([
+            'success' => true,
+            'payout_options' => $options,
         ]);
     }
 

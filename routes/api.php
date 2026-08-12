@@ -71,6 +71,7 @@ Route::prefix('/internal/toms/payment')->group(function () {
 
 Route::post('/webhooks/{provider}', [WebhookController::class, 'handle']);
 Route::get('/methods', [PaymentController::class, 'methods']);
+Route::get('/payout-options', [PaymentController::class, 'payoutOptions']);
 
 Route::middleware('auth.internal_or_delegated')->group(function () {
     Route::post('/initiate', [PaymentController::class, 'initiate'])->name('payment.initiate');
