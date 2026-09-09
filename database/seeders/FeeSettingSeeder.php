@@ -14,8 +14,11 @@ class FeeSettingSeeder extends Seeder
         FeeSetting::updateOrCreate(
             ['key' => 'default'],
             [
-                'buyer_fee_percent' => 1.00,
-                'seller_fee_percent' => 2.00,
+                'buyer_fee_percent' => (float) config('fees.buyer_fee_percent', 1),
+                'seller_fee_percent' => (float) config('fees.seller_fee_percent', 2),
+                'payout_fee_percent' => (float) config('fees.payout_fee_percent', 5),
+                'payout_minimum_amount' => (float) config('fees.payout_minimum_amount', 10000),
+                'payout_maximum_amount' => (float) config('fees.payout_maximum_amount', 5000000),
                 'is_active' => true,
                 'metadata' => [
                     'description' => 'Default platform fee setting, migrated from main platform TrustFeeSetting.',

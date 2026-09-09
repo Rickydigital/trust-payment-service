@@ -94,6 +94,9 @@ class TomsCrmController extends Controller
                     'recipient_type' => $payout->recipient_type,
                     'recipient_id' => $payout->recipient_id,
                     'amount' => $payout->amount,
+                    'requested_amount' => $payout->requested_amount ?? $payout->amount,
+                    'payout_fee_amount' => $payout->payout_fee_amount,
+                    'net_amount' => $payout->net_amount ?? $payout->amount,
                     'currency' => $payout->currency,
                 ],
             ]));
@@ -302,6 +305,10 @@ class TomsCrmController extends Controller
                 ],
                 'payload' => [
                     'amount' => $payout->amount,
+                    'requested_amount' => $payout->requested_amount ?? $payout->amount,
+                    'payout_fee_percent' => $payout->payout_fee_percent,
+                    'payout_fee_amount' => $payout->payout_fee_amount,
+                    'net_amount' => $payout->net_amount ?? $payout->amount,
                     'currency' => $payout->currency,
                     'provider_key' => $payout->provider_key,
                     'provider_reference' => $payout->provider_reference,

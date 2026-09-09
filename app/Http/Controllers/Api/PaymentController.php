@@ -76,6 +76,12 @@ class PaymentController extends Controller
         return response()->json([
             'success' => true,
             'payout_options' => $options,
+            'payout_policy' => [
+                'fee_percent' => (float) config('fees.payout_fee_percent', 5),
+                'minimum_amount' => (float) config('fees.payout_minimum_amount', 10000),
+                'maximum_amount' => (float) config('fees.payout_maximum_amount', 5000000),
+                'currency' => 'TZS',
+            ],
         ]);
     }
 

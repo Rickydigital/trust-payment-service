@@ -16,6 +16,10 @@ class PayoutJob extends Model
         'escrow_split_id',
         'recipient_type',
         'recipient_id',
+        'requested_amount',
+        'payout_fee_percent',
+        'payout_fee_amount',
+        'net_amount',
         'amount',
         'currency',
         'provider_key',
@@ -38,6 +42,10 @@ class PayoutJob extends Model
 
     protected $casts = [
         'amount' => 'decimal:2',
+        'requested_amount' => 'decimal:2',
+        'payout_fee_percent' => 'decimal:2',
+        'payout_fee_amount' => 'decimal:2',
+        'net_amount' => 'decimal:2',
         'provider_request' => 'array',
         'provider_response' => 'array',
         'attempts' => 'integer',

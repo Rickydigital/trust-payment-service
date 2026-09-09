@@ -39,6 +39,8 @@ class InitiatePaymentRequest extends FormRequest
             'order_splits' => ['nullable', 'array'],
             'order_splits.*.order_reference' => ['required_with:order_splits', 'string', 'max:64'],
             'order_splits.*.amount' => ['required_with:order_splits', 'numeric', 'min:0'],
+            'order_splits.*.buyer_fee_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'order_splits.*.buyer_fee_amount' => ['nullable', 'numeric', 'min:0'],
             'order_splits.*.subtotal' => ['nullable', 'numeric', 'min:0'],
             'order_splits.*.shipping_fee' => ['nullable', 'numeric', 'min:0'],
             'order_splits.*.discount_amount' => ['nullable', 'numeric', 'min:0'],

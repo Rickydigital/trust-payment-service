@@ -41,6 +41,11 @@ class WalletController extends Controller
             ->where('status', 'paid')
             ->sum(fn ($split) => (float) ($split->net_amount ?: $split->amount));
         $fees = $splits->sum(fn ($split) => (float) $split->platform_fee);
+        $payouts = PayoutJob::query()
+            ->where('recipient_type', $ownerType)
+            ->where('recipient_id', $ownerId)
+            ->get();
+        $payoutPolicy = $this->payoutPolicy();
 
         return response()->json([
             'success' => true,
@@ -54,7 +59,16 @@ class WalletController extends Controller
                 'withdraw_pending_balance' => round($withdrawPending, 2),
                 'withdrawn_balance' => round($withdrawn, 2),
                 'platform_fee_total' => round($fees, 2),
+                'payout_fee_total' => round((float) $payouts
+                    ->whereIn('status', ['queued', 'pending', 'processing', 'manual_review', 'held', 'completed'])
+                    ->sum(fn (PayoutJob $job) => (float) $job->payout_fee_amount), 2),
+                'payout_net_total' => round((float) $payouts
+                    ->where('status', 'completed')
+                    ->sum(fn (PayoutJob $job) => (float) ($job->net_amount ?? $job->amount)), 2),
                 'failed_payouts_count' => $splits->where('status', 'failed')->count(),
+                'payout_fee_percent' => $payoutPolicy['fee_percent'],
+                'payout_minimum_amount' => $payoutPolicy['minimum_amount'],
+                'payout_maximum_amount' => $payoutPolicy['maximum_amount'],
             ],
         ]);
     }
@@ -85,6 +99,10 @@ class WalletController extends Controller
                 'payout' => $split->payoutJob ? [
                     'reference' => $split->payoutJob->reference,
                     'status' => $split->payoutJob->status,
+                    'requested_amount' => (float) ($split->payoutJob->requested_amount ?? $split->payoutJob->amount),
+                    'payout_fee_percent' => (float) $split->payoutJob->payout_fee_percent,
+                    'payout_fee_amount' => (float) $split->payoutJob->payout_fee_amount,
+                    'net_amount' => (float) ($split->payoutJob->net_amount ?? $split->payoutJob->amount),
                     'provider_key' => $split->payoutJob->provider_key,
                     'provider_reference' => $split->payoutJob->provider_reference,
                     'attempts' => $split->payoutJob->attempts,
@@ -99,13 +117,10 @@ class WalletController extends Controller
         $data = $this->validateWithdrawal($request);
         $available = $this->availableSplits($data['owner_type'], $data['owner_id'], false);
         $availableAmount = $available->sum(fn ($split) => (float) ($split->net_amount ?: $split->amount));
-        $amount = round((float) ($data['amount'] ?? $availableAmount), 2);
-
-        if ($amount <= 0 || $amount > $availableAmount) {
-            throw ValidationException::withMessages([
-                'amount' => 'Withdrawal amount exceeds available balance.',
-            ]);
-        }
+        $policy = $this->payoutPolicy();
+        $amount = $this->requestedAmount($data['amount'] ?? null, $availableAmount, $policy);
+        $feeAmount = $this->payoutFee($amount, $policy['fee_percent']);
+        $netAmount = round($amount - $feeAmount, 2);
 
         return response()->json([
             'success' => true,
@@ -113,6 +128,13 @@ class WalletController extends Controller
                 'owner_type' => $data['owner_type'],
                 'owner_id' => $data['owner_id'],
                 'amount' => $amount,
+                'requested_amount' => $amount,
+                'payout_fee_percent' => $policy['fee_percent'],
+                'payout_fee_amount' => $feeAmount,
+                'net_amount' => $netAmount,
+                'minimum_amount' => $policy['minimum_amount'],
+                'maximum_amount' => $policy['maximum_amount'],
+                'available_amount' => round($availableAmount, 2),
                 'currency' => $available->first()?->currency ?? 'TZS',
                 'provider_key' => $data['provider_key'],
                 'payout_account' => $data['payout_account'],
@@ -127,18 +149,30 @@ class WalletController extends Controller
         return DB::transaction(function () use ($data) {
             $available = $this->availableSplits($data['owner_type'], $data['owner_id']);
             $availableAmount = $available->sum(fn ($split) => (float) ($split->net_amount ?: $split->amount));
-            $amount = round((float) ($data['amount'] ?? $availableAmount), 2);
-
-            if ($amount <= 0 || $amount > $availableAmount) {
-                throw ValidationException::withMessages([
-                    'amount' => 'Withdrawal amount exceeds available balance.',
-                ]);
-            }
+            $policy = $this->payoutPolicy();
+            $amount = $this->requestedAmount($data['amount'] ?? null, $availableAmount, $policy);
+            $totalFee = $this->payoutFee($amount, $policy['fee_percent']);
+            $totalNet = round($amount - $totalFee, 2);
 
             $selected = $this->selectSplits($available, $amount);
             $jobs = [];
+            $remainingFee = $totalFee;
+            $lastIndex = $selected->count() - 1;
 
-            foreach ($selected as $split) {
+            foreach ($selected as $index => $split) {
+                $requestedAmount = round((float) ($split->net_amount ?: $split->amount), 2);
+                $feeAmount = $index === $lastIndex
+                    ? $remainingFee
+                    : round($amount > 0 ? $totalFee * ($requestedAmount / $amount) : 0, 2);
+                $remainingFee = round($remainingFee - $feeAmount, 2);
+                $netAmount = round($requestedAmount - $feeAmount, 2);
+
+                if ($netAmount <= 0) {
+                    throw ValidationException::withMessages([
+                        'amount' => 'The payout fee leaves no amount to send. Increase the withdrawal amount.',
+                    ]);
+                }
+
                 $split->update([
                     'status' => 'withdraw_pending',
                     'recipient_account' => $this->normalizeAccount($data['payout_account']),
@@ -149,7 +183,11 @@ class WalletController extends Controller
                     'escrow_split_id' => $split->id,
                     'recipient_type' => $split->recipient_type,
                     'recipient_id' => $split->recipient_id,
-                    'amount' => $split->net_amount ?: $split->amount,
+                    'requested_amount' => $requestedAmount,
+                    'payout_fee_percent' => $policy['fee_percent'],
+                    'payout_fee_amount' => $feeAmount,
+                    'net_amount' => $netAmount,
+                    'amount' => $netAmount,
                     'currency' => $split->currency,
                     'provider_key' => $data['provider_key'],
                     'status' => 'queued',
@@ -163,11 +201,26 @@ class WalletController extends Controller
 
             return response()->json([
                 'success' => true,
-                'message' => 'Withdrawal queued.',
+                'message' => sprintf(
+                    'Withdrawal queued. %s TZS fee deducted; %s TZS will be sent.',
+                    number_format($totalFee, 2),
+                    number_format($totalNet, 2),
+                ),
+                'summary' => [
+                    'requested_amount' => $amount,
+                    'payout_fee_percent' => $policy['fee_percent'],
+                    'payout_fee_amount' => $totalFee,
+                    'net_amount' => $totalNet,
+                    'currency' => $available->first()?->currency ?? 'TZS',
+                ],
                 'withdrawals' => collect($jobs)->map(fn (PayoutJob $job) => [
                     'reference' => $job->reference,
                     'status' => $job->status,
                     'amount' => (float) $job->amount,
+                    'requested_amount' => (float) $job->requested_amount,
+                    'payout_fee_percent' => (float) $job->payout_fee_percent,
+                    'payout_fee_amount' => (float) $job->payout_fee_amount,
+                    'net_amount' => (float) $job->net_amount,
                     'currency' => $job->currency,
                     'provider_key' => $job->provider_key,
                 ])->values(),
@@ -196,6 +249,52 @@ class WalletController extends Controller
         $this->ensurePayoutMethod($data['provider_key']);
 
         return $data;
+    }
+
+    private function payoutPolicy(): array
+    {
+        $feePercent = max(0, min(100, (float) config('fees.payout_fee_percent', 5)));
+        $minimum = max(1, (float) config('fees.payout_minimum_amount', 10000));
+        $maximum = max($minimum, (float) config('fees.payout_maximum_amount', 5000000));
+
+        return [
+            'fee_percent' => round($feePercent, 2),
+            'minimum_amount' => round($minimum, 2),
+            'maximum_amount' => round($maximum, 2),
+        ];
+    }
+
+    private function requestedAmount(?float $requested, float $available, array $policy): float
+    {
+        if ($available <= 0) {
+            throw ValidationException::withMessages([
+                'amount' => 'There is no available balance to withdraw.',
+            ]);
+        }
+
+        $amount = round($requested ?? min($available, $policy['maximum_amount']), 2);
+        if ($amount > $available) {
+            throw ValidationException::withMessages([
+                'amount' => 'Withdrawal amount exceeds available balance.',
+            ]);
+        }
+        if ($amount < $policy['minimum_amount']) {
+            throw ValidationException::withMessages([
+                'amount' => 'Minimum withdrawal is ' . number_format($policy['minimum_amount'], 2) . ' TZS.',
+            ]);
+        }
+        if ($amount > $policy['maximum_amount']) {
+            throw ValidationException::withMessages([
+                'amount' => 'Maximum withdrawal is ' . number_format($policy['maximum_amount'], 2) . ' TZS.',
+            ]);
+        }
+
+        return $amount;
+    }
+
+    private function payoutFee(float $amount, float $percent): float
+    {
+        return round(min($amount, max(0, $amount * ($percent / 100))), 2);
     }
 
     private function availableSplits(string $ownerType, string $ownerId, bool $lock = true)
